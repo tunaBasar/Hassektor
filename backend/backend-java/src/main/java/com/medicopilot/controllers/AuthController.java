@@ -3,7 +3,6 @@ package com.medicopilot.controllers;
 import com.medicopilot.controllers.dto.LoginRequest;
 import com.medicopilot.dto.ApiResponse;
 import com.medicopilot.exceptions.ValidationException;
-import com.medicopilot.models.Doctor;
 import com.medicopilot.repositories.DoctorRepository;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
@@ -37,8 +36,8 @@ public class AuthController {
         return doctorRepository.findByUsername(request.getUsername())
                 .filter(doctor -> request.getPassword() != null
                         && request.getPassword().equals(String.valueOf(doctor.getPassword())))
-                .<ResponseEntity<ApiResponse>>map(doctor ->
-                        ResponseEntity.ok(ApiResponse.ok("Login successful", doctor)))
+                .<ResponseEntity<ApiResponse>>map(
+                        doctor -> ResponseEntity.ok(ApiResponse.ok("Login successful", doctor)))
                 .switchIfEmpty(Mono.just(ResponseEntity.status(HttpStatus.UNAUTHORIZED)
                         .body(ApiResponse.error("Invalid credentials", "UNAUTHORIZED"))));
     }

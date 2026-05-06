@@ -26,6 +26,8 @@ spring:
 
 app:
   mri-storage-path: ${MRI_STORAGE_PATH:./uploads/mri}
+  encryption:
+    secret-key: ${ENCRYPTION_SECRET_KEY:MediCopilot2026SecretKey32Bytes!}
 
 server:
   port: 8080
@@ -33,4 +35,3 @@ server:
 springdoc:
   swagger-ui:
     path: /swagger-ui.html
-

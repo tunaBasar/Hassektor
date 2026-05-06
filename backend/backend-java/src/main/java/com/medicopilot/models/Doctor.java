@@ -1,5 +1,6 @@
 package com.medicopilot.models;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
@@ -22,6 +23,7 @@ public class Doctor {
 
     private String username;
 
+    @JsonIgnore
     private String password;
 
     private String fullName;

@@ -5,11 +5,12 @@ import { Button } from '@/components/ui/button';
 import {
   FileText, User, Clock, Brain, CheckCircle2, AlertTriangle,
   FilePlus2, Loader2, X, PenLine, Bot, ChevronRight, RefreshCw,
-  Eye
+  Eye, Download
 } from 'lucide-react';
 import { toast } from 'sonner';
 import axios from 'axios';
 import { useAppStore } from '@/store/useAppStore';
+import { generateMriReportPdf } from '@/lib/pdfGenerator';
 
 /* ─── Types ──────────────────────────────────────────────────────── */
 interface Report {
@@ -23,6 +24,16 @@ interface Report {
   status: 'DRAFT' | 'REVIEW_NEEDED' | 'APPROVED';
   createdAt: string | null;
   updatedAt: string | null;
+}
+
+interface PatientInfo {
+  id: string;
+  nationalId?: string | null;
+  firstName?: string | null;
+  lastName?: string | null;
+  dateOfBirth?: string | null;
+  gender?: string | null;
+  fullName?: string | null;
 }
 
 type TabKey = 'all' | 'mine';
@@ -117,6 +128,7 @@ function ReportDetailModal({ report, onClose, onApproved }: DetailModalProps) {
   const [editedText, setEditedText] = useState(report.aiDraftText || '');
   const [isEdited, setIsEdited] = useState(false);
   const [isApproving, setIsApproving] = useState(false);
+  const [isDownloadingPdf, setIsDownloadingPdf] = useState(false);
   const canApprove = report.status === 'REVIEW_NEEDED';
 
   const handleTextChange = useCallback((e: React.ChangeEvent<HTMLTextAreaElement>) => {
@@ -138,6 +150,31 @@ function ReportDetailModal({ report, onClose, onApproved }: DetailModalProps) {
     } catch (err: any) {
       toast.error(err.response?.data?.message || 'Onaylama sırasında hata oluştu.');
       setIsApproving(false);
+    }
+  };
+
+  const handleDownloadPdf = async () => {
+    setIsDownloadingPdf(true);
+    try {
+      // Fetch patient info for the PDF
+      let patient: PatientInfo | null = null;
+      try {
+        const patientRes = await axios.get(`/api/v1/patients/${report.patientId}`);
+        if (patientRes.data?.success && patientRes.data?.data) {
+          patient = patientRes.data.data;
+        }
+      } catch {
+        // If patient fetch fails, continue with null (will show IDs only)
+        console.warn('Patient info could not be loaded for PDF.');
+      }
+
+      await generateMriReportPdf(report, patient);
+      toast.success('PDF başarıyla oluşturuldu ve indirildi!');
+    } catch (err: any) {
+      console.error('PDF generation error:', err);
+      toast.error('PDF oluşturulurken bir hata oluştu.');
+    } finally {
+      setIsDownloadingPdf(false);
     }
   };
 
@@ -179,14 +216,37 @@ function ReportDetailModal({ report, onClose, onApproved }: DetailModalProps) {
               </div>
               <StatusBadge status={report.status} />
             </div>
-            <Button
-              variant="ghost"
-              size="icon"
-              onClick={onClose}
-              className="text-slate-400 hover:text-slate-100 hover:bg-slate-800 rounded-xl h-10 w-10"
-            >
-              <X className="w-5 h-5" />
-            </Button>
+            <div className="flex items-center gap-2">
+              {/* Download PDF Button */}
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={handleDownloadPdf}
+                disabled={isDownloadingPdf}
+                className="text-blue-400 border-blue-500/30 hover:bg-blue-500/10 hover:text-blue-300 hover:border-blue-400/50 rounded-xl h-10 px-4 gap-2 transition-all"
+                id="download-pdf-button"
+              >
+                {isDownloadingPdf ? (
+                  <>
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                    <span className="text-xs font-semibold">Oluşturuluyor...</span>
+                  </>
+                ) : (
+                  <>
+                    <Download className="w-4 h-4" />
+                    <span className="text-xs font-semibold">PDF İndir</span>
+                  </>
+                )}
+              </Button>
+              <Button
+                variant="ghost"
+                size="icon"
+                onClick={onClose}
+                className="text-slate-400 hover:text-slate-100 hover:bg-slate-800 rounded-xl h-10 w-10"
+              >
+                <X className="w-5 h-5" />
+              </Button>
+            </div>
           </div>
 
           {/* Body */}

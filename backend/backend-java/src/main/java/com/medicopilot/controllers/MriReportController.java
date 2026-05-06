@@ -2,14 +2,18 @@ package com.medicopilot.controllers;
 
 import com.medicopilot.controllers.dto.ReportUpdateRequest;
 import com.medicopilot.dto.ApiResponse;
+import com.medicopilot.models.Patient;
 import com.medicopilot.models.Report;
 import com.medicopilot.models.ReportStatus;
+import com.medicopilot.repositories.PatientRepository;
 import com.medicopilot.services.MriReportService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
 import io.swagger.v3.oas.annotations.media.Content;
 import io.swagger.v3.oas.annotations.media.Schema;
 import io.swagger.v3.oas.annotations.tags.Tag;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.core.io.FileSystemResource;
 import org.springframework.core.io.Resource;
 import org.springframework.http.HttpStatus;
@@ -30,10 +34,14 @@ import java.util.UUID;
 @Tag(name = "MRI Reports", description = "MRI report upload, listing, and approval endpoints")
 public class MriReportController {
 
-    private final MriReportService mriReportService;
+    private static final Logger log = LoggerFactory.getLogger(MriReportController.class);
 
-    public MriReportController(MriReportService mriReportService) {
+    private final MriReportService mriReportService;
+    private final PatientRepository patientRepository;
+
+    public MriReportController(MriReportService mriReportService, PatientRepository patientRepository) {
         this.mriReportService = mriReportService;
+        this.patientRepository = patientRepository;
     }
 
     @Operation(summary = "Upload MRI image", description = "Uploads an MRI image, creates a DRAFT report, and fires a Kafka event for AI processing")
@@ -103,7 +111,14 @@ public class MriReportController {
 
         return mriReportService.findById(reportId)
                 .map(report -> {
-                    Path filePath = Path.of(report.getImagePath()).toAbsolutePath().normalize();
+                    // T15: Path traversal guard — validates path stays within base directory
+                    Path filePath;
+                    try {
+                        filePath = mriReportService.resolveAndValidateImagePath(report.getImagePath());
+                    } catch (SecurityException e) {
+                        log.error("Path traversal attempt blocked for reportId={}: {}", reportId, e.getMessage());
+                        return ResponseEntity.status(HttpStatus.FORBIDDEN).<Resource>build();
+                    }
 
                     if (!Files.exists(filePath) || !Files.isReadable(filePath)) {
                         return ResponseEntity.notFound().<Resource>build();
@@ -121,5 +136,65 @@ public class MriReportController {
                             .contentType(MediaType.parseMediaType(contentType))
                             .body(resource);
                 });
+    }
+
+    @Operation(summary = "Get patient by ID", description = "Retrieves patient information by patient ID for report PDF generation. Returns normalized data with fallback defaults.")
+    @GetMapping("/patients/{patientId}")
+    public Mono<ResponseEntity<ApiResponse<Patient>>> getPatientById(@PathVariable String patientId) {
+        return patientRepository.findById(patientId)
+                .map(patient -> {
+                    // T8: nationalId'yi API yanıtında şifresiz döndür (çöz)
+                    if (patient.getNationalId() != null && !patient.getNationalId().isBlank()) {
+                        try {
+                            patient.setNationalId(mriReportService.decryptNationalId(patient.getNationalId()));
+                        } catch (Exception e) {
+                            log.warn("nationalId decrypt edilemedi (zaten düz metin olabilir): {}", e.getMessage());
+                        }
+                    }
+                    // Normalize: eski dokümanlar sadece fullName'e sahip, firstName/lastName yok
+                    normalizePatientFields(patient);
+                    return ResponseEntity.ok(ApiResponse.ok("Hasta bilgileri getirildi.", patient));
+                })
+                .switchIfEmpty(Mono.defer(() -> {
+                    log.info("Patient bulunamadi, fallback hasta donuluyor: patientId={}", patientId);
+                    Patient fallback = Patient.builder()
+                            .id(patientId)
+                            .firstName("Bilinmiyor")
+                            .lastName("Bilinmiyor")
+                            .fullName("Bilinmiyor")
+                            .nationalId("Belirtilmemis")
+                            .build();
+                    return Mono.just(ResponseEntity.ok(ApiResponse.ok("Fallback hasta bilgileri.", fallback)));
+                }));
+    }
+
+    /**
+     * Eski MongoDB dokümanlarıyla uyumluluk için hasta alanlarını normalize eder.
+     * Eski dokümanlar sadece fullName'e sahipken, yeni şema firstName/lastName kullanır.
+     * Null alanlar için varsayılan değerler atanır.
+     */
+    private void normalizePatientFields(Patient patient) {
+        // Eski şema: sadece fullName varsa, firstName'e kopyala
+        if (patient.getFirstName() == null && patient.getFullName() != null) {
+            String full = patient.getFullName().trim();
+            int spaceIdx = full.lastIndexOf(' ');
+            if (spaceIdx > 0) {
+                patient.setFirstName(full.substring(0, spaceIdx));
+                patient.setLastName(full.substring(spaceIdx + 1));
+            } else {
+                patient.setFirstName(full);
+            }
+        }
+        // fullName yoksa ve firstName varsa, fullName'i oluştur
+        if (patient.getFullName() == null && patient.getFirstName() != null) {
+            String fn = patient.getFirstName();
+            String ln = (patient.getLastName() != null) ? " " + patient.getLastName() : "";
+            patient.setFullName((fn + ln).trim());
+        }
+        // Null alanlar için varsayılan değerler
+        if (patient.getFirstName() == null) patient.setFirstName("Bilinmiyor");
+        if (patient.getLastName() == null) patient.setLastName("Bilinmiyor");
+        if (patient.getFullName() == null) patient.setFullName("Bilinmiyor");
+        if (patient.getNationalId() == null) patient.setNationalId("Belirtilmemis");
     }
 }

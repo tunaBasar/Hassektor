@@ -1,5 +1,6 @@
 package com.medicopilot.services;
 
+import com.medicopilot.config.EncryptionConfig;
 import com.medicopilot.exceptions.ResourceNotFoundException;
 import com.medicopilot.models.Patient;
 import com.medicopilot.models.Report;
@@ -18,6 +19,7 @@ import reactor.core.publisher.Mono;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.UUID;
 
 @Service
 public class MriReportService {
@@ -27,6 +29,8 @@ public class MriReportService {
     private final ReportRepository reportRepository;
     private final PatientRepository patientRepository;
     private final KafkaProducerService kafkaProducerService;
+    private final EncryptionConfig encryptionConfig;
+    private final MockPatientDataService mockPatientDataService;
 
     @Value("${app.mri-storage-path:./uploads/mri}")
     private String mriStoragePath;
@@ -35,10 +39,14 @@ public class MriReportService {
 
     public MriReportService(ReportRepository reportRepository,
             PatientRepository patientRepository,
-            KafkaProducerService kafkaProducerService) {
+            KafkaProducerService kafkaProducerService,
+            EncryptionConfig encryptionConfig,
+            MockPatientDataService mockPatientDataService) {
         this.reportRepository = reportRepository;
         this.patientRepository = patientRepository;
         this.kafkaProducerService = kafkaProducerService;
+        this.encryptionConfig = encryptionConfig;
+        this.mockPatientDataService = mockPatientDataService;
     }
 
     @PostConstruct
@@ -49,17 +57,21 @@ public class MriReportService {
     }
 
     public Mono<Report> createDraftReport(String patientId, String doctorId, FilePart filePart) {
-        String fileName = filePart.filename();
-        Path targetPath = storageDir.resolve(fileName).normalize();
+        // T14: UUID prefix to prevent naming collisions
+        String originalFileName = filePart.filename();
+        String safeFileName = UUID.randomUUID().toString() + "_" + originalFileName;
+        Path targetPath = storageDir.resolve(safeFileName).normalize();
         String absoluteImagePath = targetPath.toString();
 
         return filePart.transferTo(targetPath)
                 .then(patientRepository.findById(patientId)
-                        .switchIfEmpty(patientRepository.save(
-                                Patient.builder()
-                                        .id(patientId)
-                                        .fullName("Unknown Patient (Auto)")
-                                        .build())))
+                        .switchIfEmpty(Mono.defer(() -> {
+                            // Hasta DB'de yoksa → MockPatientDataService ile tam dolu hasta oluştur
+                            Patient mockPatient = mockPatientDataService.generateMockPatient(patientId);
+                            log.info("Yeni mock hasta oluşturuluyor: id={}, ad={} {}",
+                                    patientId, mockPatient.getFirstName(), mockPatient.getLastName());
+                            return patientRepository.save(mockPatient);
+                        })))
                 .flatMap(patient -> {
                     Report report = Report.builder()
                             .patientId(patient.getId())
@@ -102,5 +114,34 @@ public class MriReportService {
                     report.setStatus(status);
                     return reportRepository.save(report);
                 });
+    }
+
+    /**
+     * T8: Patient nationalId'sini AES-256-GCM ile şifreler.
+     */
+    public String encryptNationalId(String nationalId) {
+        return encryptionConfig.encrypt(nationalId);
+    }
+
+    /**
+     * T8: Şifreli nationalId'yi çözer.
+     */
+    public String decryptNationalId(String encryptedNationalId) {
+        return encryptionConfig.decrypt(encryptedNationalId);
+    }
+
+    /**
+     * T15: Path traversal koruması.
+     * Verilen dosya yolunun izin verilen base directory içinde olduğunu doğrular.
+     */
+    public Path resolveAndValidateImagePath(String imagePath) {
+        Path filePath = Path.of(imagePath).toAbsolutePath().normalize();
+
+        // Guard: dosya yolu base directory dışına çıkmamalı
+        if (!filePath.startsWith(storageDir)) {
+            throw new SecurityException("Path traversal detected: " + imagePath);
+        }
+
+        return filePath;
     }
 }

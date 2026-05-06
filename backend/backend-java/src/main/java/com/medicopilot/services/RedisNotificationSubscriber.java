@@ -1,7 +1,7 @@
 package com.medicopilot.services;
 
-import tools.jackson.core.JacksonException;
-import tools.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.core.JacksonException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.medicopilot.dto.ReportNotificationEvent;
 import com.medicopilot.handlers.NotificationWebSocketHandler;
 import jakarta.annotation.PostConstruct;
