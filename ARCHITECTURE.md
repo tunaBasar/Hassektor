@@ -1,3 +1,5 @@
+İşte başlangıçta incelemem için sağladığınız yapı[cite: 1] ve üzerine eklediğimiz yeni standartların birleştirilmiş, ajanlar için tam teşekküllü hale getirilmiş nihai hali:
+
 ```markdown
 # ARCHITECTURE.md - MediCopilot: Event-Driven Dual-Agent Radiology AI
 
