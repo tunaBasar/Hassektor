@@ -39,46 +39,43 @@ const COLORS = {
   danger: [220, 53, 69] as [number, number, number],
 };
 
+/* ─── Layout Constants ───────────────────────────────────────────── */
+const MARGIN = 18;
+const BODY_LINE_H = 4.5;       // mm per line of body text (font 9pt)
+const SMALL_LINE_H = 3.5;      // mm per line of small text (font 7pt)
+const TABLE_CELL_PAD_X = 3;    // horizontal padding inside table cells
+const TABLE_CELL_PAD_Y = 2.5;  // vertical padding inside table cells
+const FOOTER_RESERVED = 30;    // mm reserved at page bottom for footer
+
 /* ─── Font Registration ─────────────────────────────────────────── */
-let fontsLoaded = false;
+let cachedRegularB64: string | null = null;
+let cachedBoldB64: string | null = null;
 
 async function loadAndRegisterFonts(doc: jsPDF): Promise<void> {
-  if (fontsLoaded) {
-    doc.setFont('Roboto', 'normal');
-    return;
-  }
-
   try {
-    // Fetch Roboto Regular & Bold TTF from public/fonts/
-    const [regularRes, boldRes] = await Promise.all([
-      fetch('/fonts/Roboto-Regular.ttf'),
-      fetch('/fonts/Roboto-Bold.ttf'),
-    ]);
-
-    if (!regularRes.ok || !boldRes.ok) {
-      throw new Error('Font files could not be fetched');
+    if (!cachedRegularB64 || !cachedBoldB64) {
+      const [regularRes, boldRes] = await Promise.all([
+        fetch('/fonts/Roboto-Regular.ttf'),
+        fetch('/fonts/Roboto-Bold.ttf'),
+      ]);
+      if (!regularRes.ok || !boldRes.ok) {
+        throw new Error('Font files could not be fetched');
+      }
+      const [regularBuf, boldBuf] = await Promise.all([
+        regularRes.arrayBuffer(),
+        boldRes.arrayBuffer(),
+      ]);
+      cachedRegularB64 = arrayBufferToBase64(regularBuf);
+      cachedBoldB64 = arrayBufferToBase64(boldBuf);
     }
-
-    const [regularBuf, boldBuf] = await Promise.all([
-      regularRes.arrayBuffer(),
-      boldRes.arrayBuffer(),
-    ]);
-
-    // Convert ArrayBuffer → base64 string
-    const regularB64 = arrayBufferToBase64(regularBuf);
-    const boldB64 = arrayBufferToBase64(boldBuf);
-
-    // Register fonts with jsPDF VFS
-    doc.addFileToVFS('Roboto-Regular.ttf', regularB64);
+    // Must register on EVERY jsPDF instance — fonts are instance-scoped
+    doc.addFileToVFS('Roboto-Regular.ttf', cachedRegularB64);
     doc.addFont('Roboto-Regular.ttf', 'Roboto', 'normal');
-
-    doc.addFileToVFS('Roboto-Bold.ttf', boldB64);
+    doc.addFileToVFS('Roboto-Bold.ttf', cachedBoldB64);
     doc.addFont('Roboto-Bold.ttf', 'Roboto', 'bold');
-
-    fontsLoaded = true;
     doc.setFont('Roboto', 'normal');
   } catch (err) {
-    console.warn('Roboto font yuklenemedi, fallback helvetica kullanilacak:', err);
+    console.warn('Roboto font yüklenemedi, fallback helvetica kullanılacak:', err);
     doc.setFont('helvetica', 'normal');
   }
 }
@@ -124,8 +121,8 @@ function genderLabel(g: string | null | undefined): string {
   if (!g) return '-';
   switch (g.toUpperCase()) {
     case 'MALE': return 'Erkek';
-    case 'FEMALE': return 'Kadin';
-    case 'OTHER': return 'Diger';
+    case 'FEMALE': return 'Kadın';
+    case 'OTHER': return 'Diğer';
     default: return g;
   }
 }
@@ -133,240 +130,331 @@ function genderLabel(g: string | null | undefined): string {
 function statusLabel(s: string): string {
   switch (s) {
     case 'DRAFT': return 'TASLAK';
-    case 'REVIEW_NEEDED': return 'INCELEME BEKLIYOR';
+    case 'REVIEW_NEEDED': return 'İNCELEME BEKLİYOR';
     case 'APPROVED': return 'ONAYLANDI';
     default: return s;
   }
 }
 
-/* ─── Word-wrap text into lines ──────────────────────────────────── */
-function wrapText(doc: jsPDF, text: string, maxWidth: number): string[] {
+/* ─────────────────────────────────────────────────────────────────────
+ *  measureAndWrap — THE SINGLE wrapping function.
+ *
+ *  CRITICAL: jsPDF.splitTextToSize() measures glyph widths using the
+ *  CURRENTLY ACTIVE font + size. If those aren't set before the call,
+ *  the measurement is wrong and the text WILL overflow.
+ *
+ *  This function therefore EXPLICITLY sets the font + size before
+ *  every call, making it impossible to get stale metrics.
+ * ───────────────────────────────────────────────────────────────────── */
+function measureAndWrap(
+  doc: jsPDF,
+  text: string,
+  maxWidthMm: number,
+  fontSize: number,
+  fontStyle: 'normal' | 'bold' = 'normal',
+): string[] {
   if (!text) return ['-'];
-  const lines: string[] = [];
+
+  // Lock font state before measuring
+  doc.setFontSize(fontSize);
+  try {
+    doc.setFont('Roboto', fontStyle);
+  } catch {
+    doc.setFont('helvetica', fontStyle);
+  }
+
+  const result: string[] = [];
   const paragraphs = text.split('\n');
   for (const para of paragraphs) {
     if (para.trim() === '') {
-      lines.push('');
+      result.push('');
       continue;
     }
-    const wrapped = doc.splitTextToSize(para, maxWidth) as string[];
-    lines.push(...wrapped);
+    // splitTextToSize returns string[] where each element fits within maxWidthMm
+    const wrapped = doc.splitTextToSize(para, maxWidthMm) as string[];
+    result.push(...wrapped);
   }
-  return lines;
+  return result;
 }
 
 /* ─── Draw a horizontal ruled line ───────────────────────────────── */
-function drawRule(doc: jsPDF, y: number, leftX: number, rightX: number, color = COLORS.borderLight) {
+function drawRule(doc: jsPDF, y: number, x1: number, x2: number, color = COLORS.borderLight) {
   doc.setDrawColor(color[0], color[1], color[2]);
   doc.setLineWidth(0.3);
-  doc.line(leftX, y, rightX, y);
+  doc.line(x1, y, x2, y);
 }
 
-/* ─── Page check / auto-add ──────────────────────────────────────── */
-function ensureSpace(doc: jsPDF, currentY: number, needed: number, margin: number): number {
-  const pageHeight = doc.internal.pageSize.getHeight();
-  if (currentY + needed > pageHeight - margin) {
+/* ─── Page break check ───────────────────────────────────────────── */
+function ensureSpace(doc: jsPDF, currentY: number, neededMm: number): number {
+  const pageH = doc.internal.pageSize.getHeight();
+  if (currentY + neededMm > pageH - FOOTER_RESERVED) {
     doc.addPage();
-    return margin + 10;
+    return MARGIN + 5;
   }
   return currentY;
 }
 
-/* ─── Font setter helpers (Roboto with fallback) ─────────────────── */
-function setFont(doc: jsPDF, style: 'normal' | 'bold' | 'italic' = 'normal') {
-  try {
-    if (style === 'italic') {
-      // Roboto italic not loaded — use normal
-      doc.setFont('Roboto', 'normal');
-    } else {
-      doc.setFont('Roboto', style);
-    }
-  } catch {
-    doc.setFont('helvetica', style);
-  }
+/* ─── Font shorthand (sets on doc, returns nothing) ──────────────── */
+function setFont(doc: jsPDF, style: 'normal' | 'bold' = 'normal') {
+  try { doc.setFont('Roboto', style); }
+  catch { doc.setFont('helvetica', style); }
 }
 
-/* ─── Main PDF Generator (async for font loading) ────────────────── */
-export async function generateMriReportPdf(report: ReportData, patient: PatientInfo | null): Promise<void> {
+/* ═══════════════════════════════════════════════════════════════════
+ *  MAIN PDF GENERATOR
+ * ═══════════════════════════════════════════════════════════════════ */
+export async function generateMriReportPdf(
+  report: ReportData,
+  patient: PatientInfo | null,
+): Promise<void> {
   const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
-  const pageWidth = doc.internal.pageSize.getWidth();
-  const pageHeight = doc.internal.pageSize.getHeight();
-  const margin = 18;
-  const contentWidth = pageWidth - margin * 2;
+  const PW = doc.internal.pageSize.getWidth();   // 210 mm
+  const PH = doc.internal.pageSize.getHeight();  // 297 mm
+  const CW = PW - MARGIN * 2;                    // 174 mm usable content width
   let y = 0;
 
-  // ─── Load & Register Turkish-compatible Roboto font ─────────────
+  // Load & register Roboto TTF (Turkish-glyph-compatible)
   await loadAndRegisterFonts(doc);
 
-  // ─── Header Banner ──────────────────────────────────────────────
-  doc.setFillColor(COLORS.primary[0], COLORS.primary[1], COLORS.primary[2]);
-  doc.rect(0, 0, pageWidth, 38, 'F');
+  // ═══════════════════════════════════════════════════════════════
+  //  HEADER BANNER (0 – 40 mm)
+  // ═══════════════════════════════════════════════════════════════
+  doc.setFillColor(...COLORS.primary);
+  doc.rect(0, 0, PW, 38, 'F');
+  doc.setFillColor(...COLORS.accent);
+  doc.rect(0, 38, PW, 2, 'F');
 
-  // Header accent stripe
-  doc.setFillColor(COLORS.accent[0], COLORS.accent[1], COLORS.accent[2]);
-  doc.rect(0, 38, pageWidth, 2, 'F');
-
-  // Hospital logo area (circle)
-  doc.setFillColor(COLORS.white[0], COLORS.white[1], COLORS.white[2]);
-  doc.circle(margin + 10, 19, 8, 'F');
+  // Logo circle
+  doc.setFillColor(...COLORS.white);
+  doc.circle(MARGIN + 10, 19, 8, 'F');
   doc.setFontSize(14);
-  doc.setTextColor(COLORS.primary[0], COLORS.primary[1], COLORS.primary[2]);
+  doc.setTextColor(...COLORS.primary);
   setFont(doc, 'bold');
-  doc.text('MC', margin + 10, 21.5, { align: 'center' });
+  doc.text('MC', MARGIN + 10, 21.5, { align: 'center' });
 
-  // Title text
+  // Title
   doc.setFontSize(18);
-  doc.setTextColor(COLORS.white[0], COLORS.white[1], COLORS.white[2]);
+  doc.setTextColor(...COLORS.white);
   setFont(doc, 'bold');
-  doc.text('MediCopilot', margin + 24, 16);
-
+  doc.text('MediCopilot', MARGIN + 24, 16);
   doc.setFontSize(8.5);
   setFont(doc, 'normal');
   doc.setTextColor(200, 210, 230);
-  doc.text('MR Radyoloji Raporu', margin + 24, 23);
+  doc.text('MR Radyoloji Raporu', MARGIN + 24, 23);
 
-  // Report metadata right side
-  doc.setFontSize(7.5);
-  doc.setTextColor(200, 210, 230);
-  setFont(doc, 'normal');
-  const reportIdShort = report.id.length > 12 ? report.id.slice(0, 12) + '...' : report.id;
-  doc.text('Rapor ID: ' + reportIdShort, pageWidth - margin, 13, { align: 'right' });
-  doc.text('Tarih: ' + formatDateTR(report.createdAt), pageWidth - margin, 18.5, { align: 'right' });
-  doc.text('Durum: ' + statusLabel(report.status), pageWidth - margin, 24, { align: 'right' });
+  // Right-side meta (wrapped within 55 mm so it can't overflow)
+  const RIGHT_COL_MAX = 55;
+  const reportIdShort = report.id.length > 12
+    ? report.id.slice(0, 12) + '...'
+    : report.id;
+
+  const metaItems = [
+    'Rapor ID: ' + reportIdShort,
+    'Tarih: ' + formatDateTR(report.createdAt),
+    'Durum: ' + statusLabel(report.status),
+  ];
+  let metaY = 13;
+  for (const item of metaItems) {
+    const lines = measureAndWrap(doc, item, RIGHT_COL_MAX, 7.5, 'normal');
+    doc.setTextColor(200, 210, 230);
+    for (const ln of lines) {
+      doc.text(ln, PW - MARGIN, metaY, { align: 'right' });
+      metaY += SMALL_LINE_H;
+    }
+  }
 
   y = 48;
 
-  // ─── Patient Information Table ──────────────────────────────────
+  // ═══════════════════════════════════════════════════════════════
+  //  PATIENT TABLE — dynamic row heights, text always wraps
+  // ═══════════════════════════════════════════════════════════════
   doc.setFontSize(10);
   setFont(doc, 'bold');
-  doc.setTextColor(COLORS.primary[0], COLORS.primary[1], COLORS.primary[2]);
-  doc.text('HASTA BILGILERI', margin, y);
+  doc.setTextColor(...COLORS.primary);
+  doc.text('HASTA BİLGİLERİ', MARGIN, y);
   y += 2;
-
-  // Horizontal divider
-  doc.setFillColor(COLORS.primary[0], COLORS.primary[1], COLORS.primary[2]);
-  doc.rect(margin, y, contentWidth, 0.6, 'F');
+  doc.setFillColor(...COLORS.primary);
+  doc.rect(MARGIN, y, CW, 0.6, 'F');
   y += 4;
 
-  // Patient table
-  const tableStartY = y;
-  const rowHeight = 8;
+  const LABEL_COL_W = 40;
+  const VALUE_COL_W = CW - LABEL_COL_W;
+  const LABEL_TEXT_W = LABEL_COL_W - TABLE_CELL_PAD_X * 2;   // 34 mm
+  const VALUE_TEXT_W = VALUE_COL_W - TABLE_CELL_PAD_X * 2;   // 128 mm
 
-  // Build patient data rows — handle both found & fallback patient
-  const patientId = patient?.id || report.patientId || '-';
-  const nationalId = patient?.nationalId || '-';
-  const firstName = patient?.firstName || '-';
-  const lastName = patient?.lastName || '-';
+  const pid = patient?.id || report.patientId || '-';
+  const nid = patient?.nationalId || '-';
+  const fname = patient?.firstName || '-';
+  const lname = patient?.lastName || '-';
   const dob = formatDateOnly(patient?.dateOfBirth);
-  const gender = genderLabel(patient?.gender);
+  const gen = genderLabel(patient?.gender);
 
-  const rows = [
-    ['Hasta ID', patientId],
-    ['TC Kimlik No', nationalId],
-    ['Ad', firstName],
-    ['Soyad', lastName],
-    ['Dogum Tarihi', dob],
-    ['Cinsiyet', gender],
+  const rows: [string, string][] = [
+    ['Hasta ID', pid],
+    ['TC Kimlik No', nid],
+    ['Ad', fname],
+    ['Soyad', lname],
+    ['Doğum Tarihi', dob],
+    ['Cinsiyet', gen],
   ];
 
-  const labelColWidth = 40;
-  const valueColWidth = contentWidth - labelColWidth;
+  const TABLE_FONT = 8.5;
 
-  rows.forEach((row, idx) => {
-    const rowY = tableStartY + idx * rowHeight;
+  for (let i = 0; i < rows.length; i++) {
+    const [label, value] = rows[i];
 
-    // Alternating row background
-    if (idx % 2 === 0) {
-      doc.setFillColor(COLORS.lightBg[0], COLORS.lightBg[1], COLORS.lightBg[2]);
-    } else {
-      doc.setFillColor(COLORS.white[0], COLORS.white[1], COLORS.white[2]);
-    }
-    doc.rect(margin, rowY, contentWidth, rowHeight, 'F');
+    // Wrap BOTH columns with font properly set before measurement
+    const labelLines = measureAndWrap(doc, label, LABEL_TEXT_W, TABLE_FONT, 'bold');
+    const valueLines = measureAndWrap(doc, value, VALUE_TEXT_W, TABLE_FONT, 'normal');
 
-    // Cell borders
-    doc.setDrawColor(COLORS.borderLight[0], COLORS.borderLight[1], COLORS.borderLight[2]);
+    const maxLines = Math.max(labelLines.length, valueLines.length);
+    const rowH = Math.max(8, maxLines * BODY_LINE_H + TABLE_CELL_PAD_Y * 2);
+
+    y = ensureSpace(doc, y, rowH);
+
+    // Background
+    doc.setFillColor(...(i % 2 === 0 ? COLORS.lightBg : COLORS.white));
+    doc.rect(MARGIN, y, CW, rowH, 'F');
+
+    // Borders
+    doc.setDrawColor(...COLORS.borderLight);
     doc.setLineWidth(0.2);
-    doc.rect(margin, rowY, labelColWidth, rowHeight, 'S');
-    doc.rect(margin + labelColWidth, rowY, valueColWidth, rowHeight, 'S');
+    doc.rect(MARGIN, y, LABEL_COL_W, rowH, 'S');
+    doc.rect(MARGIN + LABEL_COL_W, y, VALUE_COL_W, rowH, 'S');
 
     // Label text
-    doc.setFontSize(8.5);
+    doc.setFontSize(TABLE_FONT);
     setFont(doc, 'bold');
-    doc.setTextColor(COLORS.dark[0], COLORS.dark[1], COLORS.dark[2]);
-    doc.text(row[0], margin + 3, rowY + 5.5);
+    doc.setTextColor(...COLORS.dark);
+    const baselineY = y + TABLE_CELL_PAD_Y + 3;
+    for (let li = 0; li < labelLines.length; li++) {
+      doc.text(labelLines[li], MARGIN + TABLE_CELL_PAD_X, baselineY + li * BODY_LINE_H);
+    }
 
     // Value text
+    doc.setFontSize(TABLE_FONT);
     setFont(doc, 'normal');
-    doc.setTextColor(COLORS.text[0], COLORS.text[1], COLORS.text[2]);
-    doc.text(row[1], margin + labelColWidth + 3, rowY + 5.5);
-  });
+    doc.setTextColor(...COLORS.text);
+    for (let vi = 0; vi < valueLines.length; vi++) {
+      doc.text(valueLines[vi], MARGIN + LABEL_COL_W + TABLE_CELL_PAD_X, baselineY + vi * BODY_LINE_H);
+    }
 
-  y = tableStartY + rows.length * rowHeight + 10;
+    y += rowH;
+  }
 
-  // ─── Doctor Report/Opinion Section (doctorFinalText ONLY) ───────
-  y = ensureSpace(doc, y, 30, margin);
+  y += 10;
+
+  // ═══════════════════════════════════════════════════════════════
+  //  DOCTOR REPORT SECTION
+  // ═══════════════════════════════════════════════════════════════
+  y = ensureSpace(doc, y, 20);
 
   doc.setFontSize(10);
   setFont(doc, 'bold');
-  doc.setTextColor(COLORS.primary[0], COLORS.primary[1], COLORS.primary[2]);
-  doc.text('Doktor Raporu', margin, y);
+  doc.setTextColor(...COLORS.primary);
+  doc.text('Doktor Raporu', MARGIN, y);
   y += 2;
-
-  doc.setFillColor(COLORS.primary[0], COLORS.primary[1], COLORS.primary[2]);
-  doc.rect(margin, y, contentWidth, 0.4, 'F');
+  doc.setFillColor(...COLORS.primary);
+  doc.rect(MARGIN, y, CW, 0.4, 'F');
   y += 5;
 
+  // The text block MUST stay within  [MARGIN + pad .. MARGIN + CW - pad]
+  const TEXT_PAD = 3;
+  const TEXT_MAX_W = CW - TEXT_PAD * 2;  // 168 mm
+
   if (report.doctorFinalText) {
-    // Doctor verified badge
+    // ── Verified badge ──────────────────────────────────────────
+    const badgeStr = 'Bu metin doktor tarafından incelenmiş ve onaylanmıştır.';
+    const badgeLines = measureAndWrap(doc, badgeStr, TEXT_MAX_W, 7, 'normal');
+    const badgeH = Math.max(6, badgeLines.length * SMALL_LINE_H + 3);
+
+    y = ensureSpace(doc, y, badgeH + 4);
     doc.setFillColor(230, 245, 238);
-    doc.roundedRect(margin, y - 1, contentWidth, 6, 1.5, 1.5, 'F');
+    doc.roundedRect(MARGIN, y - 1, CW, badgeH, 1.5, 1.5, 'F');
     doc.setFontSize(7);
     setFont(doc, 'normal');
-    doc.setTextColor(COLORS.success[0], COLORS.success[1], COLORS.success[2]);
-    doc.text('Bu metin doktor tarafindan incelenmis ve onaylanmistir.', margin + 3, y + 2.5);
-    y += 9;
+    doc.setTextColor(...COLORS.success);
+    let by = y + 2.5;
+    for (const bl of badgeLines) {
+      doc.text(bl, MARGIN + TEXT_PAD, by);
+      by += SMALL_LINE_H;
+    }
+    y += badgeH + 3;
 
-    const doctorLines = wrapText(doc, report.doctorFinalText, contentWidth - 6);
+    // ── Doctor final text body ──────────────────────────────────
+    // measureAndWrap sets font 9pt normal BEFORE calling splitTextToSize
+    const bodyLines = measureAndWrap(doc, report.doctorFinalText, TEXT_MAX_W, 9, 'normal');
+
+    // Now keep font state in sync for rendering
     doc.setFontSize(9);
     setFont(doc, 'normal');
-    doc.setTextColor(COLORS.text[0], COLORS.text[1], COLORS.text[2]);
+    doc.setTextColor(...COLORS.text);
 
-    for (const line of doctorLines) {
-      y = ensureSpace(doc, y, 6, margin);
-      doc.text(line, margin + 3, y);
-      y += 4.5;
+    for (const line of bodyLines) {
+      y = ensureSpace(doc, y, BODY_LINE_H + 2);
+      doc.text(line, MARGIN + TEXT_PAD, y);
+      y += BODY_LINE_H;
     }
   } else {
-    doc.setFontSize(8.5);
-    setFont(doc, 'normal');
-    doc.setTextColor(COLORS.lightText[0], COLORS.lightText[1], COLORS.lightText[2]);
-    doc.text('Henuz doktor tarafindan onaylanmamistir.', margin + 3, y);
-    y += 6;
+    // Placeholder — no report yet
+    const phLines = measureAndWrap(
+      doc,
+      'Henüz doktor tarafından onaylanmamıştır.',
+      TEXT_MAX_W, 8.5, 'normal',
+    );
+    doc.setTextColor(...COLORS.lightText);
+    for (const pl of phLines) {
+      y = ensureSpace(doc, y, BODY_LINE_H + 2);
+      doc.text(pl, MARGIN + TEXT_PAD, y);
+      y += BODY_LINE_H;
+    }
+    y += 2;
   }
 
-  // ─── Footer ────────────────────────────────────────────────────
+  // ═══════════════════════════════════════════════════════════════
+  //  FOOTER — every page, always within margins
+  // ═══════════════════════════════════════════════════════════════
   const totalPages = doc.getNumberOfPages();
-  for (let i = 1; i <= totalPages; i++) {
-    doc.setPage(i);
+  const FOOTER_COL_W = CW / 2 - 2; // ~85 mm per footer column
 
-    // Footer line
-    drawRule(doc, pageHeight - 18, margin, pageWidth - margin, COLORS.borderLight);
+  for (let pg = 1; pg <= totalPages; pg++) {
+    doc.setPage(pg);
 
-    // Footer text
+    // Divider
+    drawRule(doc, PH - 22, MARGIN, PW - MARGIN, COLORS.borderLight);
+
+    // Left column
+    const fl1 = measureAndWrap(doc, 'MediCopilot - Event-Driven Dual-Agent Radiology AI System', FOOTER_COL_W, 6.5, 'normal');
+    const fl2 = measureAndWrap(doc, 'Bu rapor yapay zekâ destekli olarak üretilmiştir. Doktor onayı olmadan geçerli değildir.', FOOTER_COL_W, 6.5, 'normal');
     doc.setFontSize(6.5);
     setFont(doc, 'normal');
-    doc.setTextColor(COLORS.lightText[0], COLORS.lightText[1], COLORS.lightText[2]);
-    doc.text('MediCopilot - Event-Driven Dual-Agent Radiology AI System', margin, pageHeight - 13);
-    doc.text('Bu rapor yapay zeka destekli olarak uretilmistir. Doktor onayi olmadan gecerli degildir.', margin, pageHeight - 9.5);
-    doc.text('Sayfa ' + i + ' / ' + totalPages, pageWidth - margin, pageHeight - 13, { align: 'right' });
-    doc.text('Olusturulma: ' + new Date().toLocaleString('tr-TR'), pageWidth - margin, pageHeight - 9.5, { align: 'right' });
+    doc.setTextColor(...COLORS.lightText);
 
-    // Bottom accent stripe
-    doc.setFillColor(COLORS.primary[0], COLORS.primary[1], COLORS.primary[2]);
-    doc.rect(0, pageHeight - 4, pageWidth, 4, 'F');
+    let flY = PH - 19;
+    for (const l of fl1) { doc.text(l, MARGIN, flY); flY += 3; }
+    flY += 0.5;
+    for (const l of fl2) { doc.text(l, MARGIN, flY); flY += 3; }
+
+    // Right column
+    const fr1 = measureAndWrap(doc, 'Sayfa ' + pg + ' / ' + totalPages, FOOTER_COL_W, 6.5, 'normal');
+    const fr2 = measureAndWrap(doc, 'Oluşturulma: ' + new Date().toLocaleString('tr-TR'), FOOTER_COL_W, 6.5, 'normal');
+
+    let frY = PH - 19;
+    for (const l of fr1) { doc.text(l, PW - MARGIN, frY, { align: 'right' }); frY += 3; }
+    frY += 0.5;
+    for (const l of fr2) { doc.text(l, PW - MARGIN, frY, { align: 'right' }); frY += 3; }
+
+    // Bottom stripe
+    doc.setFillColor(...COLORS.primary);
+    doc.rect(0, PH - 4, PW, 4, 'F');
   }
 
-  // ─── Download ──────────────────────────────────────────────────
-  const fileName = 'MediCopilot_MR_Rapor_' + report.patientId + '_' + report.id.slice(-6).toUpperCase() + '.pdf';
+  // ═══════════════════════════════════════════════════════════════
+  //  DOWNLOAD
+  // ═══════════════════════════════════════════════════════════════
+  const fileName =
+    'MediCopilot_MR_Rapor_' +
+    report.patientId + '_' +
+    report.id.slice(-6).toUpperCase() + '.pdf';
   doc.save(fileName);
 }

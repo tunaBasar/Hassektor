@@ -15,11 +15,26 @@ export default defineConfig({
       '/api': {
         target: 'http://localhost:8080',
         changeOrigin: true,
+        configure: (proxy) => {
+          proxy.on('error', (err) => {
+            console.warn('[vite] API proxy error (backend may be offline):', err.message);
+          });
+        },
       },
       '/ws': {
         target: 'http://localhost:8080',
         changeOrigin: true,
         ws: true,
+        configure: (proxy) => {
+          proxy.on('error', (err) => {
+            // Silently handle ECONNRESET — backend is not running
+          });
+          proxy.on('proxyReqWs', (_proxyReq, _req, socket) => {
+            socket.on('error', () => {
+              // Suppress WS socket errors (ECONNRESET)
+            });
+          });
+        },
       }
     }
   }
