@@ -10,7 +10,7 @@ MediCopilot, devlet hastanelerindeki radyoloji departmanlarında yaşanan raporl
 Bu projede görev alan tüm AI kodlama ajanları (Cursor, Claude, vb.), kod üretirken kesinlikle aşağıdaki güncel sürüm standartlarına uymalıdır:
 
 *   **Frontend (UI Katmanı):** React 20, Vite 7.x, Tailwind CSS v4, Shadcn UI (Dark Mode Default).
-*   **Backend (Core API Katmanı):** Java 25, Spring Boot 4.1.x, Spring WebFlux (Reaktif).
+*   **Backend (Core API Katmanı):** Java 25, Spring Boot 4.0.6, Spring WebFlux (Reaktif).
 *   **AI Engine (Worker Katmanı):** Python 3.14, LangChain v0.3+, Pydantic v2.
 *   **Veritabanı (NoSQL):** MongoDB 8.0.
 *   **Message Broker:** Apache Kafka 4.0 (Zookeeper KESİNLİKLE YOK, KRaft modu kullanılacak).
