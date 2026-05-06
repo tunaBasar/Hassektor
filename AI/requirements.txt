@@ -1,0 +1,6 @@
+kafka-python
+pymongo
+redis
+openai
+python-dotenv
+Pillow
