@@ -6,45 +6,74 @@ import com.medicopilot.models.Report;
 import com.medicopilot.models.ReportStatus;
 import com.medicopilot.repositories.PatientRepository;
 import com.medicopilot.repositories.ReportRepository;
+import jakarta.annotation.PostConstruct;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.http.codec.multipart.FilePart;
 import org.springframework.stereotype.Service;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+
 @Service
 public class MriReportService {
+
+    private static final Logger log = LoggerFactory.getLogger(MriReportService.class);
 
     private final ReportRepository reportRepository;
     private final PatientRepository patientRepository;
     private final KafkaProducerService kafkaProducerService;
 
+    @Value("${app.mri-storage-path:./uploads/mri}")
+    private String mriStoragePath;
+
+    private Path storageDir;
+
     public MriReportService(ReportRepository reportRepository,
-                            PatientRepository patientRepository,
-                            KafkaProducerService kafkaProducerService) {
+            PatientRepository patientRepository,
+            KafkaProducerService kafkaProducerService) {
         this.reportRepository = reportRepository;
         this.patientRepository = patientRepository;
         this.kafkaProducerService = kafkaProducerService;
     }
 
-    public Mono<Report> createDraftReport(String patientId, String doctorId, String originalFileName) {
-        String mockImagePath = "/data/mri/" + originalFileName;
+    @PostConstruct
+    void initStorageDir() throws IOException {
+        storageDir = Path.of(mriStoragePath).toAbsolutePath().normalize();
+        Files.createDirectories(storageDir);
+        log.info("MRI depolama dizini hazır: {}", storageDir);
+    }
 
-        return patientRepository.findById(patientId)
-                .switchIfEmpty(patientRepository.save(
-                        Patient.builder()
-                                .id(patientId)
-                                .fullName("Unknown Patient (Auto)")
-                                .build()))
+    public Mono<Report> createDraftReport(String patientId, String doctorId, FilePart filePart) {
+        String fileName = filePart.filename();
+        Path targetPath = storageDir.resolve(fileName).normalize();
+        String absoluteImagePath = targetPath.toString();
+
+        return filePart.transferTo(targetPath)
+                .then(patientRepository.findById(patientId)
+                        .switchIfEmpty(patientRepository.save(
+                                Patient.builder()
+                                        .id(patientId)
+                                        .fullName("Unknown Patient (Auto)")
+                                        .build())))
                 .flatMap(patient -> {
                     Report report = Report.builder()
                             .patientId(patient.getId())
                             .doctorId(doctorId)
-                            .imagePath(mockImagePath)
+                            .imagePath(absoluteImagePath)
                             .status(ReportStatus.DRAFT)
                             .build();
                     return reportRepository.save(report);
                 })
-                .doOnSuccess(saved -> kafkaProducerService.sendMriIngestionEvent(
-                        saved.getId(), saved.getPatientId(), saved.getImagePath()));
+                .doOnSuccess(saved -> {
+                    log.info("Rapor oluşturuldu: {} → dosya: {}", saved.getId(), absoluteImagePath);
+                    kafkaProducerService.sendMriIngestionEvent(
+                            saved.getId(), saved.getPatientId(), saved.getImagePath());
+                });
     }
 
     public Mono<Report> findById(String reportId) {
@@ -53,7 +82,17 @@ public class MriReportService {
     }
 
     public Flux<Report> findByStatus(ReportStatus status) {
+        if (status == null) {
+            return reportRepository.findAll();
+        }
         return reportRepository.findByStatus(status);
+    }
+
+    public Flux<Report> findByDoctorId(String doctorId, ReportStatus status) {
+        if (status == null) {
+            return reportRepository.findByDoctorId(doctorId);
+        }
+        return reportRepository.findByDoctorIdAndStatus(doctorId, status);
     }
 
     public Mono<Report> updateReport(String reportId, String doctorFinalText, ReportStatus status) {

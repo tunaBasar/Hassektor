@@ -4,23 +4,49 @@ import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import { Stethoscope, Loader2, KeyRound } from 'lucide-react';
 import { useAppStore } from '@/store/useAppStore';
+import { toast } from 'sonner';
+import axios from 'axios';
 
 export function LoginView() {
-  const { setIsAuthenticated } = useAppStore();
+  const { setIsAuthenticated, setDoctorInfo } = useAppStore();
   const [isLoading, setIsLoading] = useState(false);
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
+  const [errorMessage, setErrorMessage] = useState('');
 
-  const handleLogin = (e: React.FormEvent) => {
+  const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!username || !password) return;
 
     setIsLoading(true);
-    // Fake 1s API delay
-    setTimeout(() => {
+    setErrorMessage('');
+
+    try {
+      const response = await axios.post('/api/v1/auth/login', {
+        username,
+        password,
+      });
+
+      const apiResponse = response.data;
+
+      if (apiResponse.success && apiResponse.data) {
+        const doctor = apiResponse.data;
+        setDoctorInfo(doctor.id, doctor.fullName || doctor.username);
+        setIsAuthenticated(true);
+        toast.success(`Hoş geldiniz, ${doctor.fullName || doctor.username}`);
+      } else {
+        setErrorMessage(apiResponse.message || 'Giriş başarısız.');
+        toast.error(apiResponse.message || 'Giriş başarısız.');
+      }
+    } catch (error: any) {
+      const msg =
+        error.response?.data?.message ||
+        'Giriş yapılamadı. Sunucu bağlantısını kontrol edin.';
+      setErrorMessage(msg);
+      toast.error(msg);
+    } finally {
       setIsLoading(false);
-      setIsAuthenticated(true);
-    }, 1000);
+    }
   };
 
   return (
@@ -66,6 +92,12 @@ export function LoginView() {
                 <KeyRound className="w-5 h-5 text-slate-500 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
               </div>
             </div>
+
+            {errorMessage && (
+              <p className="text-sm text-red-400 bg-red-400/10 border border-red-400/20 rounded-lg px-4 py-2 text-center">
+                {errorMessage}
+              </p>
+            )}
 
             <Button
               type="submit"

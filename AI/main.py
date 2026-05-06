@@ -29,6 +29,15 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 
+def _safe_json_deserializer(raw_bytes: bytes):
+    """Bozuk/boş mesajlarda crash yerine None döndürür."""
+    try:
+        return json.loads(raw_bytes.decode("utf-8"))
+    except Exception:
+        log.warning(f"Kafka mesajı JSON olarak parse edilemedi, atlanıyor. ham={raw_bytes!r}")
+        return None
+
+
 def main() -> None:
     log.info("MediCopilot AI Worker başlatılıyor...")
 
@@ -43,16 +52,23 @@ def main() -> None:
         group_id="medicopilot-ai-worker",
         auto_offset_reset="earliest",
         enable_auto_commit=False,  # Manuel commit: hata durumunda offset ilerlememeli
-        value_deserializer=lambda b: json.loads(b.decode("utf-8")),
+        value_deserializer=_safe_json_deserializer,
     )
 
     log.info("Kafka dinleniyor → mri_ingestion_topic")
 
     for message in consumer:
         payload = message.value
-        report_id = payload.get("report_id", "bilinmiyor")
-        patient_id = payload.get("patient_id", "bilinmiyor")
-        image_path = payload.get("image_path", "")
+
+        # Bozuk mesajları atla (Dead Letter mantığı)
+        if payload is None:
+            log.warning(f"Geçersiz mesaj atlanıyor: partition={message.partition}, offset={message.offset}")
+            consumer.commit()
+            continue
+
+        report_id = payload.get("reportId", "bilinmiyor")
+        patient_id = payload.get("patientId", "bilinmiyor")
+        image_path = payload.get("imagePath", "")
 
         log.info(f"[{report_id}] Yeni mesaj alındı | hasta={patient_id} | görüntü={image_path}")
 
@@ -61,9 +77,13 @@ def main() -> None:
         try:
             draft_text = drafting_agent.run(image_path)
             log.info(f"[{report_id}] Taslak rapor başarıyla üretildi.")
-        except FileNotFoundError:
-            log.error(f"[{report_id}] Görüntü dosyası bulunamadı: {image_path} — mesaj atlanıyor.")
-            consumer.commit()  # Geçersiz mesaj, Dead Letter mantığı: tekrar deneme anlamsız
+        except FileNotFoundError as fnf:
+            log.error(f"[{report_id}] {fnf}")
+            consumer.commit()
+            continue
+        except PermissionError as pe:
+            log.error(f"[{report_id}] {pe}")
+            consumer.commit()
             continue
         except Exception as exc:
             log.error(f"[{report_id}] Taslak üretimi başarısız: {exc}")
@@ -87,20 +107,26 @@ def main() -> None:
 
         # Adım 3: Sonuca göre MongoDB güncelleme ve bildirim
         try:
-            if is_safe:
-                db.update_report(report_id, draft_text, confidence)
-                log.info(f"[{report_id}] MongoDB güncellendi → REVIEW_NEEDED")
-
-                notifier.notify(report_id, patient_id)
-                log.info(f"[{report_id}] Redis bildirimi gönderildi → report_notifications")
-            else:
+            final_confidence = confidence if is_safe else 0.3
+            if not is_safe:
                 log.warning(
-                    f"[{report_id}] Rapor güvensiz bulundu, doktor bildirimi gönderilmiyor. "
+                    f"[{report_id}] Rapor güvensiz bulundu, düşük güvenle kaydediliyor. "
                     f"Uyarılar: {warnings}"
                 )
-                # Düşük güven skoru ile yaz, manuel inceleme için beklet
-                db.update_report(report_id, draft_text, 0.3)
-                log.info(f"[{report_id}] MongoDB güncellendi → REVIEW_NEEDED (güven=0.3, manuel inceleme gerekli)")
+
+            db_ok = db.update_report(report_id, draft_text, final_confidence)
+
+            if not db_ok:
+                log.error(
+                    f"[{report_id}] MongoDB güncelleme BAŞARISIZ — bildirim gönderilmeyecek. "
+                    f"report_id={report_id!r} değerini MongoDB'de kontrol edin."
+                )
+                consumer.commit()
+                continue
+
+            log.info(f"[{report_id}] MongoDB güncellendi → REVIEW_NEEDED (güven={final_confidence:.2f})")
+
+            notifier.notify(report_id, patient_id)
         except KafkaError as exc:
             # Kafka hatası: offset commit etme, mesaj yeniden işlenecek
             log.critical(f"[{report_id}] Kafka hatası, offset commit edilmiyor: {exc}")

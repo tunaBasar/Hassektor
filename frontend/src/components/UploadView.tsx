@@ -14,7 +14,7 @@ export function UploadView({ onAnalyze }: UploadViewProps) {
   const [file, setFile] = useState<File | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const { analysisStatus, setAnalysisStatus, setReportId, resetStore } = useAppStore();
+  const { analysisStatus, setAnalysisStatus, setReportId, resetStore, doctorId } = useAppStore();
 
   const isUploading = analysisStatus === 'UPLOADING';
 
@@ -85,6 +85,9 @@ export function UploadView({ onAnalyze }: UploadViewProps) {
       
       const formData = new FormData();
       formData.append('file', file);
+      if (doctorId) {
+        formData.append('doctorId', doctorId);
+      }
       
       const response = await axios.post('/api/v1/mri/upload', formData, {
         headers: {
@@ -92,8 +95,8 @@ export function UploadView({ onAnalyze }: UploadViewProps) {
         },
       });
       
-      // Backend'den report_id bekleniyor. (Örn: { report_id: "uuid-123" })
-      const reportId = response.data?.report_id || response.data?.id;
+      const apiResponse = response.data;
+      const reportId = apiResponse?.data?.id;
       
       if (!reportId) {
         throw new Error("Sunucudan report_id alınamadı.");

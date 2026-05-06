@@ -51,3 +51,5 @@ volumes:
     driver: local
   kafka_data:
     driver: local
+  mri_images:
+    driver: local

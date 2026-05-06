@@ -2,6 +2,7 @@ package com.medicopilot.controllers;
 
 import com.medicopilot.controllers.dto.LoginRequest;
 import com.medicopilot.dto.ApiResponse;
+import com.medicopilot.exceptions.ValidationException;
 import com.medicopilot.models.Doctor;
 import com.medicopilot.repositories.DoctorRepository;
 import io.swagger.v3.oas.annotations.Operation;
@@ -26,6 +27,13 @@ public class AuthController {
     @PostMapping("/login")
     @SuppressWarnings("rawtypes")
     public Mono<ResponseEntity<ApiResponse>> login(@RequestBody LoginRequest request) {
+        if (request.getUsername() == null || request.getUsername().isBlank()) {
+            throw new ValidationException("Kullanıcı adı boş olamaz.");
+        }
+        if (request.getPassword() == null || request.getPassword().isBlank()) {
+            throw new ValidationException("Şifre boş olamaz.");
+        }
+
         return doctorRepository.findByUsername(request.getUsername())
                 .filter(doctor -> request.getPassword() != null
                         && request.getPassword().equals(String.valueOf(doctor.getPassword())))

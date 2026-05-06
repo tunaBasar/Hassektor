@@ -24,9 +24,13 @@ spring:
   main:
     web-application-type: reactive
 
+app:
+  mri-storage-path: ${MRI_STORAGE_PATH:./uploads/mri}
+
 server:
   port: 8080
 
 springdoc:
   swagger-ui:
     path: /swagger-ui.html
+

@@ -1,9 +1,11 @@
 import os
 import json
+import logging
 import redis
 from dotenv import load_dotenv
 
 load_dotenv()
+log = logging.getLogger(__name__)
 
 
 class RedisNotifier:
@@ -14,8 +16,19 @@ class RedisNotifier:
             decode_responses=True,
         )
 
-    def notify(self, report_id: str, patient_id: str) -> None:
+    def notify(self, report_id: str, patient_id: str) -> int:
+        """Redis Pub/Sub ile bildirim gönderir. Dinleyen abone sayısını döner."""
+        channel = "report_notifications"
         payload = json.dumps(
-            {"report_id": report_id, "patient_id": patient_id, "status": "READY"}
+            {"reportId": report_id, "patientId": patient_id, "status": "READY"}
         )
-        self._client.publish("report_notifications", payload)
+        subscribers = self._client.publish(channel, payload)
+        if subscribers == 0:
+            log.warning(
+                f"[{report_id}] Redis publish yapıldı ama 0 abone dinliyor! "
+                f"Java backend'in Redis subscriber'ı çalışıyor mu kontrol edin. "
+                f"Kanal: {channel}"
+            )
+        else:
+            log.info(f"[{report_id}] Redis publish → {channel} ({subscribers} abone aldı)")
+        return subscribers

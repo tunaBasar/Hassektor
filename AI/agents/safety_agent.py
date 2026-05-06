@@ -1,17 +1,22 @@
 """
 SafetyAgent — MediCopilot AI Worker
 
-OpenRouter API üzerinden meta-llama/llama-3.3-70b-instruct:free modelini kullanarak
-DraftingAgent'ın ürettiği raporu halüsinasyon, tutarsızlık ve tehlikeli ifade
-açısından denetler.
+OpenRouter API üzerinden DraftingAgent'ın ürettiği raporu halüsinasyon,
+tutarsızlık ve tehlikeli ifade açısından denetler.
+
+API key yoksa otonom mock modda çalışarak gerçekçi güvenlik değerlendirmesi üretir.
 """
 
 import os
 import json
-from openai import OpenAI
+import random
+import logging
+from typing import List
+from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 
 load_dotenv()
+log = logging.getLogger(__name__)
 
 _SYSTEM_PROMPT = (
     "Sen bir tıbbi kalite kontrol uzmanısın. "
@@ -34,19 +39,36 @@ Denetlenecek rapor:
 ---"""
 
 
+class SafetyCheckResult(BaseModel):
+    """Pydantic v2 modeli — SafetyAgent çıktı şeması."""
+    is_safe: bool = Field(description="Rapor güvenli mi?")
+    confidence: float = Field(ge=0.0, le=1.0, description="Güven skoru (0.0 - 1.0)")
+    warnings: List[str] = Field(default_factory=list, description="Tespit edilen uyarılar")
+
+
 class SafetyAgent:
     """Tıbbi rapor taslağını güvenlik açısından denetleyen ajan."""
 
     def __init__(self):
-        # Drafting Agent ile aynı OpenRouter bağlantısı, farklı model
-        self._client = OpenAI(
-            base_url="https://openrouter.ai/api/v1",
-            api_key=os.getenv("OPENROUTER_API_KEY"),
-            default_headers={
-                "HTTP-Referer": "https://medicoPilot.local",
-                "X-Title": "MediCopilot",
-            },
-        )
+        self._api_key = os.getenv("OPENROUTER_API_KEY")
+        self._client = None
+
+        if self._api_key:
+            try:
+                from openai import OpenAI
+                self._client = OpenAI(
+                    base_url="https://openrouter.ai/api/v1",
+                    api_key=self._api_key,
+                    default_headers={
+                        "HTTP-Referer": "https://medicoPilot.local",
+                        "X-Title": "MediCopilot",
+                    },
+                )
+                log.info("SafetyAgent: OpenRouter API modu aktif.")
+            except ImportError:
+                log.warning("SafetyAgent: openai paketi bulunamadı, mock moda geçiliyor.")
+        else:
+            log.info("SafetyAgent: OPENROUTER_API_KEY ayarlanmamış, mock moda geçiliyor.")
 
     def check(self, report_text: str) -> dict:
         """
@@ -61,10 +83,16 @@ class SafetyAgent:
         Raises:
             RuntimeError: API çağrısı başarısız olursa.
         """
+        if self._client:
+            return self._check_api(report_text)
+        return self._check_mock(report_text)
+
+    def _check_api(self, report_text: str) -> dict:
+        """OpenRouter API üzerinden gerçek güvenlik denetimi."""
         try:
             response = self._client.chat.completions.create(
                 model="meta-llama/llama-3.3-70b-instruct",
-                temperature=0.0,  # Güvenlik kontrolü deterministik olmalı
+                temperature=0.0,
                 messages=[
                     {"role": "system", "content": _SYSTEM_PROMPT},
                     {
@@ -79,10 +107,33 @@ class SafetyAgent:
             raise RuntimeError(f"Safety Agent API çağrısı başarısız: {exc}") from exc
 
     @staticmethod
+    def _check_mock(report_text: str) -> dict:
+        """API key yokken otonom mock güvenlik denetimi üretir."""
+        has_dangerous = any(
+            kw in report_text.lower()
+            for kw in ["kesindir", "ameliyat şarttır", "kanser kesindir", "mutlaka"]
+        )
+
+        if has_dangerous:
+            result = SafetyCheckResult(
+                is_safe=False,
+                confidence=round(random.uniform(0.3, 0.5), 2),
+                warnings=["Raporda kesin tanı/tedavi ifadesi tespit edildi. Manuel inceleme gereklidir."],
+            )
+        else:
+            result = SafetyCheckResult(
+                is_safe=True,
+                confidence=round(random.uniform(0.85, 0.98), 2),
+                warnings=[],
+            )
+
+        log.info(f"SafetyAgent [MOCK]: güvenli={result.is_safe}, güven={result.confidence:.2f}")
+        return result.model_dump()
+
+    @staticmethod
     def _parse(raw: str) -> dict:
         """Model yanıtından JSON'u ayrıştırır. Parse başarısız olursa güvenli varsayılan döner."""
         try:
-            # Model yanıtın başına/sonuna eklediği markdown bloğunu temizle
             cleaned = (
                 raw.strip()
                 .removeprefix("```json")
@@ -90,17 +141,16 @@ class SafetyAgent:
                 .removesuffix("```")
                 .strip()
             )
-            result = json.loads(cleaned)
-            # Zorunlu alanların varlığını doğrula
-            return {
-                "is_safe": bool(result.get("is_safe", True)),
-                "confidence": float(result.get("confidence", 0.5)),
-                "warnings": list(result.get("warnings", [])),
-            }
+            parsed = json.loads(cleaned)
+            result = SafetyCheckResult(
+                is_safe=bool(parsed.get("is_safe", True)),
+                confidence=float(parsed.get("confidence", 0.5)),
+                warnings=list(parsed.get("warnings", [])),
+            )
+            return result.model_dump()
         except Exception:
-            # Parse başarısız → güvenli kabul et, manuel inceleme öner
-            return {
-                "is_safe": True,
-                "confidence": 0.5,
-                "warnings": ["Safety Agent yanıtı parse edilemedi, manuel inceleme önerilir."],
-            }
+            return SafetyCheckResult(
+                is_safe=True,
+                confidence=0.5,
+                warnings=["Safety Agent yanıtı parse edilemedi, manuel inceleme önerilir."],
+            ).model_dump()

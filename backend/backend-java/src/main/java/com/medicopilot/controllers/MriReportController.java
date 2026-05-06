@@ -10,6 +10,8 @@ import io.swagger.v3.oas.annotations.Parameter;
 import io.swagger.v3.oas.annotations.media.Content;
 import io.swagger.v3.oas.annotations.media.Schema;
 import io.swagger.v3.oas.annotations.tags.Tag;
+import org.springframework.core.io.FileSystemResource;
+import org.springframework.core.io.Resource;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
@@ -17,7 +19,11 @@ import org.springframework.http.codec.multipart.FilePart;
 import org.springframework.web.bind.annotation.*;
 import reactor.core.publisher.Mono;
 
+import java.net.URLConnection;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.List;
+import java.util.UUID;
 
 @RestController
 @RequestMapping("/api/v1")
@@ -37,12 +43,16 @@ public class MriReportController {
                     content = @Content(mediaType = MediaType.APPLICATION_OCTET_STREAM_VALUE,
                             schema = @Schema(type = "string", format = "binary")))
             @RequestPart("file") FilePart file,
-            @Parameter(description = "Patient ID to associate with this MRI scan", required = true)
-            @RequestPart("patientId") String patientId,
+            @Parameter(description = "Patient ID to associate with this MRI scan (auto-generated if omitted)")
+            @RequestPart(value = "patientId", required = false) String patientId,
             @Parameter(description = "Doctor ID performing the upload (from login)")
             @RequestPart(value = "doctorId", required = false) String doctorId) {
 
-        return mriReportService.createDraftReport(patientId, doctorId, file.filename())
+        String resolvedPatientId = (patientId != null && !patientId.isBlank())
+                ? patientId.trim()
+                : "P-" + UUID.randomUUID().toString().substring(0, 8);
+
+        return mriReportService.createDraftReport(resolvedPatientId, doctorId, file)
                 .map(report -> ResponseEntity
                         .status(HttpStatus.ACCEPTED)
                         .body(ApiResponse.ok("Görüntü başarıyla kuyruğa alındı.", report)));
@@ -74,5 +84,42 @@ public class MriReportController {
 
         return mriReportService.updateReport(reportId, request.getDoctorFinalText(), request.getStatus())
                 .map(updated -> ResponseEntity.ok(ApiResponse.ok("Rapor güncellendi.", updated)));
+    }
+
+    @Operation(summary = "List doctor's reports", description = "Lists reports belonging to a specific doctor, optionally filtered by status")
+    @GetMapping("/reports/doctor/{doctorId}")
+    public Mono<ResponseEntity<ApiResponse<List<Report>>>> getReportsByDoctor(
+            @PathVariable String doctorId,
+            @RequestParam(value = "status", required = false) ReportStatus status) {
+
+        return mriReportService.findByDoctorId(doctorId, status)
+                .collectList()
+                .map(reports -> ResponseEntity.ok(ApiResponse.ok("Doktor raporları listelendi.", reports)));
+    }
+
+    @Operation(summary = "View MR image", description = "Serves the MRI image file associated with a report as a binary stream")
+    @GetMapping("/mri/view/{reportId}")
+    public Mono<ResponseEntity<Resource>> viewMriImage(@PathVariable String reportId) {
+
+        return mriReportService.findById(reportId)
+                .map(report -> {
+                    Path filePath = Path.of(report.getImagePath()).toAbsolutePath().normalize();
+
+                    if (!Files.exists(filePath) || !Files.isReadable(filePath)) {
+                        return ResponseEntity.notFound().<Resource>build();
+                    }
+
+                    Resource resource = new FileSystemResource(filePath);
+
+                    // Detect content type from file name
+                    String contentType = URLConnection.guessContentTypeFromName(filePath.getFileName().toString());
+                    if (contentType == null) {
+                        contentType = "application/octet-stream";
+                    }
+
+                    return ResponseEntity.ok()
+                            .contentType(MediaType.parseMediaType(contentType))
+                            .body(resource);
+                });
     }
 }

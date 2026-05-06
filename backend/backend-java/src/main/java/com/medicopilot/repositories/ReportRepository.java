@@ -10,4 +10,8 @@ import reactor.core.publisher.Flux;
 public interface ReportRepository extends ReactiveMongoRepository<Report, String> {
 
     Flux<Report> findByStatus(ReportStatus status);
+
+    Flux<Report> findByDoctorId(String doctorId);
+
+    Flux<Report> findByDoctorIdAndStatus(String doctorId, ReportStatus status);
 }
