@@ -1,0 +1,53 @@
+services:
+  # ----------------------------------------
+  # 1. MONGODB 8.0 (Official)
+  # ----------------------------------------
+  mongodb:
+    image: mongo:8.0
+    container_name: medicopilot-mongo
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+    restart: unless-stopped
+
+  # ----------------------------------------
+  # 2. REDIS 8.0 (Alpine - Official)
+  # ----------------------------------------
+  redis:
+    image: redis:8.0-alpine
+    container_name: medicopilot-redis
+    ports:
+      - "6379:6379"
+    restart: unless-stopped
+
+  # ----------------------------------------
+  # 3. APACHE KAFKA 4.2.x (Resmi İmaj - KRaft Modu)
+  # ----------------------------------------
+  kafka:
+    image: apache/kafka:4.2.0
+    container_name: medicopilot-kafka
+    ports:
+      - "9092:9092"
+    environment:
+      # Zookeeper olmadan çalışma ayarları (KRaft)
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:9093
+      # Tek node çalıştığımız için replikasyon faktörlerini 1'e çekiyoruz
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    restart: unless-stopped
+
+volumes:
+  mongo_data:
+    driver: local
+  kafka_data:
+    driver: local
